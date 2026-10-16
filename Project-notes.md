@@ -92,3 +92,123 @@ go.mod – Defines the Go module name and manages project dependencies.
 *   **Tooling Note:** You can use a tool like `air` in your terminal to run the server with automatic live-reloading.
 
 13. installed postgres
+
+command for logging into postgres:
+psql -U postgres
+
+command to check the DBs:
+\l
+
+NOTE: we always write SQL queries in uppercase
+";" terminate the line
+
+command to create database:
+CREATE DATABASE todo_api;
+
+command to select database:
+\c todo_api;
+
+command to exit postgres:
+\q
+
+14. Need to add postgres connection string to the application and make ENV file
+
+15. made a config file with this command:
+mkdir -p internal/config && touch internal/config/config.go
+
+16. Configure the confing file.
+why is it package config and not config main?
+Here is the new information formatted to match your existing study notes:
+
+# Go Project Structure & Packages
+
+## 1. The `package` Declaration
+*   Every Go file starts with a `package` declaration, which names the package the file belongs to.
+*   **Convention:** The package name should match the name of the directory it resides in (e.g., files in the `internal/config` directory should use `package config`).
+*   **Usage:** The package name is what you type before the dot when calling its functions from another file (e.g., `config.Load()`).
+
+## 2. `package main` (The Executable)
+*   **Special Purpose:** `package main` is unique. It tells the Go compiler to build an executable program rather than a shared library.
+*   **Entry Point:** It *must* contain a `func main()` function, which serves as the starting point of your application.
+*   **Where to use it:** Only in the entry-point directory of your project (e.g., `cmd/api/main.go`).
+*   **Important Rule:** You *cannot* import a `package main` into another file. Go will reject it with an error.
+
+## 3. Library Packages
+*   Any directory that isn't the main entry point is considered a library package.
+*   These are not standalone programs; they are designed to be imported and used by other parts of your application (e.g., `import "your-module/internal/config"`).
+
+## 4. The `internal/` Directory Rule
+*   **Go-Specific Feature:** Any code placed inside a directory named `internal/` can *only* be imported by other code within your own module.
+*   **Why use it:** It acts as a privacy boundary, preventing external projects from importing your app-specific code (like database configurations or internal business logic).
+
+## 5. Example: Structuring a Config Package
+*   **File Path:** `internal/config/config.go`
+*   **Declaration:** Starts with `package config`.
+*   **Contents:** Typically contains a `Config` struct (e.g., holding a `DatabaseURL` string) and a `Load()` function to read environment variables.
+*   **Execution:** Your `main.go` file imports this package and calls `config.Load()` at startup to initialize the app's configuration.
+
+17. in the config file, create a config struct and create a function to load it
+Here is the detailed explanation of your `config.go` file, formatted to match your existing study notes:
+
+# Configuration Package & Environment Variables
+
+## 1. Structs in Go (`type Config struct`)
+*   **What they are:** Structs in Go are used to define custom data structures. You can think of them as similar to classes or objects in JavaScript/TypeScript. They hold properties (key-value pairs).
+*   **In this code:** The `Config` struct acts as a blueprint to hold our application's configuration data. It contains two properties: `DatabaseURL` and `Port`, both of which are strictly typed as `string`.
+
+## 2. Exported Functions (Capitalization Rule)
+*   **The `Load()` Function:** Notice that the function name starts with a capital `L`. 
+*   **Why it matters:** In Go, if a variable, struct, or function starts with a **capital letter**, it is "exported" (public). This means it can be imported and used by other packages (like your `main.go` file). If it started with a lowercase `l`, it would be private to the `config` package.
+
+## 3. Multiple Return Types & Pointers
+*   **Signature:** `func Load() (*Config, error)`
+*   **Multiple Returns:** Go functions can return more than one value. Here, it returns the configuration data *and* an error status.
+*   **Pointer Return (`*Config`):** Instead of returning a heavy copy of the `Config` struct, the function returns a pointer to it. This is consistent with Go's focus on performance—passing the memory address rather than copying the whole object.
+
+## 4. Loading the `.env` File & Error Handling
+*   **`godotenv.Load()`:** This function from the `joho/godotenv` package looks for a `.env` file in your project and loads its variables into the system's environment.
+*   **Error Handling:** It returns an error if it fails (e.g., the file is missing). 
+*   **The `if err != nil` block:** In Go, `nil` means "null" or "nothing". If `err` is *not* `nil`, it means an error occurred. The code catches this and logs a message (`"env file not found"`).
+
+## 5. Security & Environment Variables
+*   **Best Practice:** Real-world projects never hardcode sensitive information (like database passwords or API keys) directly into the code. Instead, they are stored in a `.env` file.
+*   **`os.Getenv("VARIABLE_NAME")`:** This method from Go's standard `os` package reaches into the operating system's environment variables and grabs the value associated with the key (e.g., `"DATABASE_URL"`). The keys must exactly match what is written in your `.env` file.
+
+## 6. Initializing the Struct Pointer (`&`)
+*   **Code:** `var config *Config = &Config{ ... }`
+*   **The Ampersand (`&`):** While the asterisk (`*`) is used to *declare* a pointer variable, the ampersand (`&`) is used to *get the memory address* of a value. 
+*   **What is happening:** This block creates a new instance of the `Config` struct, populates it with the values fetched from `os.Getenv()`, grabs its memory address using `&`, and stores that address in the `config` pointer variable.
+*   **Final Step:** `return config, nil` sends the pointer back to whoever called the function, along with `nil` for the error (since it succeeded).
+
+Here is a deeper dive into how the ampersand (`&`) works in Go, specifically answering your question about whether we are writing to or fetching from that address.
+
+# Deep Dive: Pointers, `&`, and Memory Addresses
+
+To answer your question directly: **At the exact moment we use the `&`, we are neither writing to the address nor fetching from it. We are simply *finding out what the address is* so we can hand it to someone else.**
+
+Let's break down exactly what happens in this line of code:
+`var config *Config = &Config{ DatabaseURL: "...", Port: "..." }`
+
+## 1. The Creation Phase: `Config{ ... }`
+Before the ampersand does anything, Go looks at the right side of the code: `Config{ DatabaseURL: "...", Port: "..." }`.
+*   **What happens:** Go acts like a construction worker. It finds an empty plot of land in your computer's memory, builds a new `Config` struct there, and **writes** the database URL and port into that space.
+*   *Analogy:* You just built a new apartment and put furniture inside it.
+
+## 2. The Ampersand Phase: `&` (The "Address-Of" Operator)
+Now that the struct exists in memory, the ampersand (`&`) steps in. 
+*   **What happens:** The `&` operator looks at that newly built struct and asks, *"Where exactly was this built?"* It grabs the physical memory address (e.g., `0x14000123456`). 
+*   *Analogy:* The `&` is you writing down the street address of that new apartment on a piece of paper. You aren't changing the apartment, and you aren't looking at the furniture inside it yet. You are just writing down *where* it is.
+
+## 3. The Assignment Phase: `var config *Config =`
+Finally, we store that address.
+*   **What happens:** We take that memory address (the piece of paper) and save it inside the `config` variable. The asterisk (`*`) in `*Config` just tells Go: *"Hey, this variable isn't holding a struct; it's holding a memory address that points to a struct."*
+
+---
+
+## Summary: Writing vs. Fetching
+
+*   **When do we write?** We write to memory the moment we declare `Config{...}`. Go allocates the space and fills it with the environment variables.
+*   **What does `&` do?** It just generates the "map" or "address" to that space.
+*   **When do we fetch?** We fetch *later*. When this function finishes, it returns this address to your `main.go` file. Later on, when your main file wants to know the Database URL, it will use this address to go to that exact spot in memory and **fetch** the value. 
+
+By returning the address (`&`) instead of the whole struct, you are handing your `main.go` file a lightweight piece of paper with an address on it, rather than forcing Go to pick up the entire apartment and copy it over to `main.go`.

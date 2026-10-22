@@ -212,3 +212,45 @@ Finally, we store that address.
 *   **When do we fetch?** We fetch *later*. When this function finishes, it returns this address to your `main.go` file. Later on, when your main file wants to know the Database URL, it will use this address to go to that exact spot in memory and **fetch** the value. 
 
 By returning the address (`&`) instead of the whole struct, you are handing your `main.go` file a lightweight piece of paper with an address on it, rather than forcing Go to pick up the entire apartment and copy it over to `main.go`.
+
+
+17. Create a postgres.go file in the database folder
+This is to centralise the database logic and conection pooling in a single place.
+
+context is going to be used to control the database operations
+Here are your study notes for the database connection logic, formatted to match your previous notes:
+
+# Database Connection & Pooling
+
+## 1. Connection Pooling (The "Why")
+*   **The Problem:** Opening a new database connection for every single API request is very slow (taking 20-50 milliseconds each). If you get 100 requests per second, your API will bottleneck and crash.
+*   **The Solution (Pooling):** A connection pool opens a set number of connections (e.g., 10-20) and keeps them alive. 
+*   **How it works:** When an API request comes in, it "borrows" a connection from the pool. When the database query finishes, the connection is returned to the pool to be reused by the next request. 
+*   **Pointers again:** Because we are sharing and borrowing this pool across the whole app, we pass it around as a pointer (`*pgxpool.Pool`).
+
+## 2. The `Connect` Function Signature
+*   **Code:** `func Connect(databaseURL string) (*pgxpool.Pool, error)`
+*   **Capitalization:** Starts with a capital `C` so it is exported and can be called from `main.go`.
+*   **Returns:** It returns a pointer to the connection pool (`*pgxpool.Pool`) and an `error` (if something fails).
+
+## 3. The `context` Package
+*   **Code:** `var ctx context.Context = context.Background()`
+*   **What it is:** In Go, a `context` is used to carry deadlines, cancellation signals, and request-scoped values across API boundaries.
+*   **Database Usage:** We pass `ctx` to database functions so that if a query takes too long (e.g., the database hangs), we can cancel the operation instead of freezing the whole server. `context.Background()` is the standard starting point for an empty context.
+
+## 4. Parsing the Database URL
+*   **Code:** `config, err = pgxpool.ParseConfig(databaseURL)`
+*   **Purpose:** The `databaseURL` is just a long string (containing the user, password, port, and DB name). `ParseConfig` breaks this string down into a structured `Config` object that the `pgxpool` package can actually understand.
+
+## 5. Creating the Connection Pool
+*   **Code:** `pool, err = pgxpool.NewWithConfig(ctx, config)`
+*   **Purpose:** This actually establishes the pool of connections using the parsed configuration and the context. It returns the pointer to the pool (`*pgxpool.Pool`).
+
+## 6. Pinging the Database (`pool.Ping`)
+*   **Code:** `err = pool.Ping(ctx)`
+*   **Why do this?** Just because the pool was created doesn't mean the database is actually turned on or reachable. `Ping` sends a tiny test signal to the database.
+*   **Error Handling:** If the ping fails, we log the error, immediately close the broken pool (`pool.Close()`), and return the error so the app knows it failed to connect.
+
+## 7. Integration & Cleanup in `main.go` (From Transcript)
+*   When you call this `Connect` function in your `main.go` file, you need to ensure the pool eventually closes when the server shuts down.
+*   **The `defer` keyword:** In `main.go`, you will use `defer pool.Close()`. `defer` tells Go: *"Schedule this function to run at the very end, right before the current function (`main`) exits."* This ensures clean memory management and prevents ghost connections to your database.

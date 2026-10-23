@@ -311,4 +311,231 @@ Running migration commands manually requires typing out the long `DATABASE_URL` 
     *   Takes an optional number (count) of how many migrations to undo (defaults to 1).
     *   **Safety First:** It prompts the user for confirmation (`[y/N]`) before executing, preventing you from accidentally deleting your entire database.
 
-19. Creating the to do model
+19. Creating the todo data model
+Here are your study notes for creating the Todo model, formatted to match your previous sections:
+
+# Chapter 11: Creating the Todo Model
+
+## 1. Application Architecture & Data Flow
+Before writing the code, it's important to understand how a request travels through the backend:
+*   **The Flow:** Client (Postman) ➔ Router ➔ Middleware (Auth) ➔ **Handler** ➔ **Repository** ➔ Database.
+*   **Handler:** Parses the incoming HTTP request and formulates the response.
+*   **Repository:** Manages all the actual database operations (SQL queries).
+
+## 2. Development Strategy
+Instead of writing all repositories at once and then all handlers at once, the best approach is to build **one complete feature at a time**:
+1.  Define the **Model** (the data blueprint).
+2.  Write the **Repository** function (e.g., Create a Todo).
+3.  Write the **Handler** function to connect the route to the repository.
+4.  Test immediately in Postman.
+
+## 3. What is a Model? (Go Structs)
+*   **Definition:** A `struct` in Go is a custom data type that groups related variables together. It is very similar to a `class` or an `object` in JavaScript/TypeScript.
+*   **Purpose:** In this context, the `Todo` struct acts as a blueprint representing exactly **one row** in our PostgreSQL database.
+
+## 4. Struct Tags (JSON & DB Mapping)
+When data comes in from a client, it's in JSON format. When it goes into the database, it needs to match the SQL column names. Go uses **Struct Tags** (written inside backticks `` ` ``) to handle this mapping automatically.
+*   **`json:"..."` tag:** Tells Go what the key looks like when receiving or sending JSON to the frontend (e.g., `"created_at"`).
+*   **`db:"..."` tag:** Tells Go exactly which database column this data belongs to.
+
+## 5. The `Todo` Struct Code
+Here is the model created in `internal/models/todo.go`:
+
+```go
+package models
+
+import "time"
+
+type Todo struct {
+	// Field Name | Data Type | Struct Tags (JSON and DB mapping)
+	ID        int       `json:"id" db:"id"`
+	Title     string    `json:"title" db:"title"`
+	Completed bool      `json:"completed" db:"completed"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+```
+
+*   **Capitalization:** Notice that the field names (`ID`, `Title`, etc.) start with capital letters. This is required in Go to "export" them so that other packages (like the JSON parser or the database driver) can access them.
+*   **The `time` Package:** For timestamps (`CreatedAt`, `UpdatedAt`), Go uses the `time.Time` type, which requires importing the standard `time` package.
+
+20. Creating the todo repository
+Here are your detailed study notes for the Repository layer, with the code integrated directly into the theoretical explanations:
+
+# Chapter 12: Creating a Todo - Repository
+
+## 1. The Role of the Repository Layer
+*   **Separation of Concerns:** The Handler's job is *business logic* (figuring out what to do with an incoming HTTP request). The Handler should never talk directly to the database. 
+*   **The Repository's Job:** The repository acts as the middleman. Its sole purpose is to execute **SQL queries** (database logic) to read, create, update, or delete data, and then return that data back to the Handler.
+
+## 2. Function Signature & Context Timeout
+When interacting with a database, we must ensure that a broken connection doesn't freeze our entire API. We do this using a `context` with a timeout.
+In Go, context.WithTimeout returns two separate values: a new context.Context (the child context) and a context.CancelFunc (a function to cancel it).
+
+```go
+func CreateTodo(pool *pgxpool.Pool, title string, completed bool) (*models.Todo, error) {
+	// 1. Create a context that automatically expires after 5 seconds
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	
+	// 2. Schedule the cleanup of this context resource when the function finishes
+	defer cancel()
+    // ...
+```
+*   **Inputs:** The function takes the database connection `pool` (as a pointer), and the `title` and `completed` status provided by the user.
+*   **Outputs:** It returns a pointer to the newly created `models.Todo` struct, and an `error`.
+*   **Timeout:** If the database takes longer than 5 seconds to respond, the context cancels the operation, preventing the server from hanging indefinitely.
+
+## 3. The SQL Query Explained
+To add data to PostgreSQL, we write raw SQL inside a Go string.
+
+```go
+	var query string = `
+	INSERT INTO todos(title, completed)
+	VALUES($1, $2)
+	RETURNING id, title, completed, created_at, updated_at`
+```
+*   **`INSERT INTO todos(title, completed)`:** Tells the database to add a new row to the `todos` table, specifically filling in the `title` and `completed` columns.
+*   **`VALUES($1, $2)`:** These are placeholders for the actual data. We use placeholders instead of injecting strings directly to prevent errors and security issues. `$1` will be replaced by the `title`, and `$2` by the `completed` boolean.
+*   **`RETURNING ...`:** This is a special PostgreSQL feature. Normally, an `INSERT` just returns "Success". By adding `RETURNING`, we force the database to immediately hand back the fully generated row (including the auto-generated `id`, `created_at`, and `updated_at` timestamps) so we can use it in our Go code.
+
+## 4. Executing and Scanning (`QueryRow.Scan`)
+Once we have our SQL query, we need to execute it and store the returned data into a Go struct.
+
+```go
+	// 1. Create an empty struct to hold the incoming database data
+	var todo models.Todo
+
+	// 2. Execute the query and scan the result into the empty struct
+	var err error = pool.QueryRow(ctx, query, title, completed).Scan(
+		&todo.ID,
+		&todo.Title,
+		&todo.Completed,
+		&todo.CreatedAt,
+		&todo.UpdatedAt,
+	)
+```
+### Breaking down `pool.QueryRow(...).Scan(...)`:
+*   **`pool.QueryRow(ctx, query, title, completed)`:** 
+    *   This method executes the SQL query. 
+    *   It passes the `ctx` (for the 5-second timeout).
+    *   It passes the `query` string.
+    *   It passes `title` and `completed`, which safely replace the `$1` and `$2` placeholders in the SQL string.
+    *   It expects exactly **one row** to be returned from the database.
+*   **`.Scan(...)`:** 
+    *   This method takes the single row returned by PostgreSQL and copies its columns into our Go variables.
+    *   **Why the Ampersand (`&`)?** `Scan` needs to *modify* the empty `todo` struct we created. If we just passed `todo.ID`, Go would pass a *copy* of the value (which is 0), and `Scan` wouldn't be able to change the original struct. By passing the memory address (`&todo.ID`), `Scan` goes directly to that location in memory and writes the database values into our struct.
+    *   *Note:* The order of variables inside `.Scan()` must exactly match the order of the columns in your SQL `RETURNING` clause.
+
+## 5. Error Handling & Returning the Result
+Finally, we check if the database operation failed. If it succeeded, we return the populated struct.
+
+```go
+	// If the query or scan failed, return nil for the Todo, and the actual error
+	if err != nil {
+		return nil, err
+	}
+
+	// If successful, return the memory address of the populated Todo struct, and nil for the error
+	return &todo, nil
+}
+```
+
+21. Creating the todo handler
+Here are your in-depth study notes. To clear up the confusion, we will build this up from the bottom—starting with the smallest pieces of logic and combining them until we have a fully functioning API route.
+
+# Chapter 13: Creating a Todo - Handler
+
+## 1. The Big Picture: What is a Handler?
+If the **Repository** is the worker that talks to the database, the **Handler** is the receptionist. 
+1. It receives the HTTP request from the client (Postman/Frontend).
+2. It checks if the request is valid (Did they send the right data?).
+3. It hands the data to the Repository to do the heavy lifting.
+4. It takes the result from the Repository and formats an HTTP response back to the client.
+
+---
+
+## 2. Building from the Bottom Up
+
+### Step A: Defining the Input (What do we expect from the user?)
+When a user creates a Todo, they shouldn't be allowed to send an `ID` or a `CreatedAt` time—the database generates those. They should only send a `Title` and a `Completed` status. 
+
+To enforce this, we create a specific struct just for the incoming request:
+```go
+type CreateTodoInput struct{
+	Title string `json:"title" binding:"required"`
+	Completed bool `json:"completed"`
+}
+```
+*   **`binding:"required"`:** This is a magic tag provided by the Gin framework. It tells Gin: *"If the user tries to send a request without a title, reject it immediately."*
+
+### Step B: The Handler Signature & "Closures" (The Confusing Part)
+Gin requires all route handlers to have a very specific signature: `func(c *gin.Context)`. 
+**The Problem:** Our handler needs access to the database connection (`pool`), but Gin doesn't let us add `pool` to that function signature.
+**The Solution (Closures):** We write a function that *takes* the pool, and *returns* the function that Gin wants.
+
+```go
+func CreateTodoHandler(pool *pgxpool.Pool) gin.HandlerFunc {
+	// We return an anonymous function (a closure) that Gin can use.
+	// Because it is wrapped inside CreateTodoHandler, this inner function 
+	// "remembers" and has access to the 'pool' variable!
+	return func(c *gin.Context) {
+        // ... request logic goes here ...
+	}
+}
+```
+
+### Step C: Parsing and Validating the Request
+Inside that inner function, the first job of the receptionist is to read the client's JSON and put it into our `CreateTodoInput` struct.
+
+```go
+		var input CreateTodoInput
+
+		// ShouldBindJSON reads the request body and tries to fit it into 'input'
+		if err := c.ShouldBindJSON(&input); err != nil {
+			// If it fails (e.g., missing the required Title), send a 400 Bad Request
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return // Stop execution here!
+		}
+```
+*   **`&input`:** We pass the memory address so `ShouldBindJSON` can directly write the incoming data into our variable.
+*   **`http.StatusBadRequest`:** This is the standard HTTP code `400`, meaning "The client sent bad data."
+
+### Step D: Talking to the Repository
+Now that we know the input is valid, we pass it to the database layer we built in the previous chapter.
+
+```go
+		// Call the repository, passing the pool and the validated input
+		todo, err := repository.CreateTodo(pool, input.Title, input.Completed)
+
+		if err != nil {
+			// If the database fails, send a 500 Internal Server Error
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+            return
+		}
+```
+*   **`http.StatusInternalServerError`:** This is HTTP code `500`. It tells the client: "Your request was fine, but our server/database messed up."
+
+### Step E: Sending the Success Response
+If the repository successfully created the Todo, it returns the full database row (including the new ID and timestamps). We send this back to the user as proof of success.
+
+```go
+		// Send a 201 Created status, along with the newly created Todo object
+		c.JSON(http.StatusCreated, todo)
+```
+*   **`http.StatusCreated`:** This is HTTP code `201`, the standard response for successfully creating a new resource.
+
+---
+
+## 3. Wiring it all together in the Router (`main.go`)
+We have built the handler, but the server doesn't know when to trigger it. We have to connect a specific URL and HTTP method to this handler in our `main.go` file.
+
+*Transcript context: This happens in your server setup file.*
+```go
+// When a POST request hits "/todos", execute our handler.
+// We pass 'pool' into CreateTodoHandler, which returns the func(c *gin.Context) that Gin expects.
+router.POST("/todos", handlers.CreateTodoHandler(pool))
+```
+*   **Child Routes:** If your server is running on `localhost:3000`, this route listens specifically at `http://localhost:3000/todos`.
+*   **Method:** It only listens for `POST` requests. If a user sends a `GET` request to `/todos`, this handler will ignore it.

@@ -254,3 +254,61 @@ Here are your study notes for the database connection logic, formatted to match 
 ## 7. Integration & Cleanup in `main.go` (From Transcript)
 *   When you call this `Connect` function in your `main.go` file, you need to ensure the pool eventually closes when the server shuts down.
 *   **The `defer` keyword:** In `main.go`, you will use `defer pool.Close()`. `defer` tells Go: *"Schedule this function to run at the very end, right before the current function (`main`) exits."* This ensures clean memory management and prevents ghost connections to your database.
+
+18. Migrations
+Command for creating migration files:
+migrate create -ext sql -dir migrations -seq create_todos_api_table
+
+Command for running the migration files:
+migrate -path migrations -databse $env:DATABASE_URL up
+Here are your study notes for database migrations, formatted to match your previous sections:
+
+# Database Migrations (PostgreSQL)
+
+## 1. What are Database Migrations?
+*   **Definition:** Migrations are files containing SQL instructions used to change your database structure over time. Think of them as **version control for your database**.
+*   **Analogy:** If building a house, migrations are the numbered, step-by-step blueprints. Anyone (or any server) can follow them in order to build the exact same database structure from scratch.
+*   **Benefits:** Enables team collaboration, deployment safety, and the ability to safely roll back mistakes.
+
+## 2. Up vs. Down Migrations
+For every change you make to the database, you create a pair of files:
+*   **Up Migration (`.up.sql`):** Moves the database forward. Contains SQL to *create* tables, *add* columns, or insert data.
+*   **Down Migration (`.down.sql`):** Moves the database backward. Contains SQL to *undo* whatever the Up migration just did (e.g., *drop* tables, *remove* columns).
+
+## 3. Writing Migration Files (SQL)
+Migrations are written in pure SQL (Structured Query Language), not Go. 
+
+*   **Example Up Migration (Creating a Table):**
+    ```sql
+    CREATE TABLE IF NOT EXISTS todos (
+        id SERIAL PRIMARY KEY,             -- Auto-incrementing unique identifier
+        title VARCHAR(255) NOT NULL,       -- String, cannot be empty
+        completed BOOLEAN DEFAULT false,   -- Boolean, defaults to false
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    ```
+*   **Example Down Migration (Dropping a Table):**
+    ```sql
+    DROP TABLE IF EXISTS todos;
+    ```
+    *(Note: It is always easier to destroy than to build. The down migration is usually just one line!)*
+
+## 4. How Rollbacks Work
+*   **LIFO (Last In, First Out):** Migrations are numbered sequentially (1, 2, 3...). When you roll back, the database undoes them in reverse order (3, then 2, then 1).
+*   **By Count, Not ID:** You cannot tell the database to "delete migration #3". Instead, you tell it *how many* steps to go back (e.g., "roll back 1 step").
+
+## 5. Automating Migrations (The Bash Script)
+Running migration commands manually requires typing out the long `DATABASE_URL` every time. To fix this, we use a custom script (like the one you provided) to automate the process.
+
+*   **Loading Environment Variables:** 
+    The script first checks for a `.env` file and loads it (`source .env`). This securely grabs your `DATABASE_URL` without hardcoding it.
+*   **The `create` command:** 
+    Generates the blank `up` and `down` `.sql` files in the `/migrations` folder with sequential numbers.
+*   **The `up` command:** 
+    Reads the `DATABASE_URL` and executes all pending `.up.sql` files to update the database.
+*   **The `down` command:** 
+    *   Takes an optional number (count) of how many migrations to undo (defaults to 1).
+    *   **Safety First:** It prompts the user for confirmation (`[y/N]`) before executing, preventing you from accidentally deleting your entire database.
+
+19. Creating the to do model

@@ -265,6 +265,8 @@ Here are your study notes for database migrations, formatted to match your previ
 
 # Database Migrations (PostgreSQL)
 
+Command: migrate create -ext sql -dir migrations -seq rename_todos_user_to_todos
+
 ## 1. What are Database Migrations?
 *   **Definition:** Migrations are files containing SQL instructions used to change your database structure over time. Think of them as **version control for your database**.
 *   **Analogy:** If building a house, migrations are the numbered, step-by-step blueprints. Anyone (or any server) can follow them in order to build the exact same database structure from scratch.
@@ -539,3 +541,223 @@ router.POST("/todos", handlers.CreateTodoHandler(pool))
 ```
 *   **Child Routes:** If your server is running on `localhost:3000`, this route listens specifically at `http://localhost:3000/todos`.
 *   **Method:** It only listens for `POST` requests. If a user sends a `GET` request to `/todos`, this handler will ignore it.
+
+Here is a deeper dive into the Gin framework's specific keywords and methods, followed by a step-by-step explanation of how they work together in the code flow.
+
+# Deep Dive: Gin Framework Keywords
+
+Here are the 1-line explanations for the key terms and methods used in your handler:
+
+*   **`*gin.Context` (c):** The master object that holds all information about the incoming HTTP request (what the user sent) and the outgoing response (what you send back).
+*   **`binding:"required"`:** A struct tag that tells Gin's internal validator to instantly reject the request if this specific field is missing or empty.
+*   **`c.ShouldBindJSON(&input)`:** A method that reads the incoming JSON body, attempts to map it directly into your Go struct, and returns an error if the data doesn't match the struct's rules.
+*   **`c.JSON(...)`:** A method used to format and send a JSON response back to the client, requiring an HTTP status code and the data payload.
+*   **`gin.H{...}`:** A convenient shortcut provided by Gin to create on-the-fly JSON objects (under the hood, it's just a Go map: `map[string]any`).
+*   **`http.StatusBadRequest` / `StatusCreated`:** Built-in Go constants (representing numbers like 400 or 201) that make your code readable so you don't have to memorize raw HTTP status codes.
+
+---
+
+# The Code Flow: Step-by-Step
+
+Let's look at how these keywords interact in the actual lifecycle of a single API request.
+
+### 1. The Request Arrives (`*gin.Context`)
+When a user sends a POST request to `/todos`, Gin intercepts it and creates a `*gin.Context` (named `c`). This `c` contains the JSON body the user sent (e.g., `{"title": "Buy milk"}`). Gin passes this `c` into your handler function.
+
+### 2. Preparing the Container (`var input`)
+```go
+var input CreateTodoInput
+```
+Before we can read the user's data, we create an empty container (`input`) based on our struct. Because of the `binding:"required"` tag on the `Title` field, this container has strict rules.
+
+### 3. Parsing and Validating (`ShouldBindJSON`)
+```go
+if err := c.ShouldBindJSON(&input); err != nil {
+```
+We pass the memory address (`&input`) to `ShouldBindJSON`. 
+*   **What it does:** It looks at the JSON inside `c`, checks the rules, and tries to fill the `input` container. 
+*   **If it fails:** (e.g., the user forgot the title), it generates an `err`.
+
+### 4. Handling Bad Input (`c.JSON` & `gin.H`)
+```go
+    c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+    return 
+}
+```
+If `ShouldBindJSON` caught an error, we immediately stop the flow (`return`). We use `c.JSON` to send a response back. We use `http.StatusBadRequest` (400) to tell the client they messed up, and we use `gin.H` to quickly build a JSON object containing the exact error message so the user knows what to fix.
+
+### 5. Executing Business Logic
+```go
+todo, err := repository.CreateTodo(pool, input.Title, input.Completed)
+```
+If the binding was successful, the code skips the error block. We now safely extract `input.Title` and `input.Completed` and hand them off to the database repository to actually save the data.
+
+### 6. Sending the Success Response (`StatusCreated`)
+```go
+c.JSON(http.StatusCreated, todo)
+```
+Assuming the database didn't throw an error, we reach the end of the flow. We use `c.JSON` one last time. We pass `http.StatusCreated` (201) to tell the client the database insertion was successful, and we pass the `todo` object (which now includes the database-generated ID and timestamps) so the client can see exactly what was saved.
+
+22. Guide on how to make endpoints:
+Here is the file-wise guide to building your API. 
+
+In Go, organizing your files by **layers** (Separation of Concerns) is the most common approach. When you build a new feature (like adding "Users" or "Products" to your app), you will touch one file in each of these folders.
+
+Here is what your project folder structure should look like:
+
+```text
+my-go-project/
+│
+├── internal/
+│   ├── models/          # 1. Data blueprints (Structs)
+│   │   └── todo.go
+│   │
+│   ├── repository/      # 2. Database logic (SQL)
+│   │   └── todo.go
+│   │
+│   └── handlers/        # 3. HTTP logic (Gin, JSON)
+│       └── todo.go
+│
+├── main.go              # 4. Server setup and Router
+├── go.mod
+└── go.sum
+```
+
+---
+
+### 1. The `internal/models/` Folder
+**Rule of thumb:** Create one file per database table (e.g., `todo.go`, `user.go`, `product.go`).
+
+*   **What goes here:** 
+    *   The main struct that represents a row in your database.
+    *   The input structs (DTOs - Data Transfer Objects) that represent what the user is allowed to send in a request.
+*   **Example (`internal/models/todo.go`):**
+    ```go
+    package models
+    import "time"
+
+    // The Database Model
+    type Todo struct {
+        ID        int       `json:"id" db:"id"`
+        Title     string    `json:"title" db:"title"`
+        Completed bool      `json:"completed" db:"completed"`
+        CreatedAt time.Time `json:"created_at" db:"created_at"`
+    }
+
+    // The Input Model (What the client sends)
+    type CreateTodoInput struct {
+        Title     string `json:"title" binding:"required"`
+        Completed bool   `json:"completed"`
+    }
+    ```
+
+### 2. The `internal/repository/` Folder
+**Rule of thumb:** Create one file per entity (e.g., `todo.go` or `todo_repo.go`). 
+
+*   **What goes here:** 
+    *   Functions that execute raw SQL queries (`INSERT`, `SELECT`, `UPDATE`, `DELETE`).
+    *   **No HTTP logic** (no Gin context, no JSON parsing). Just Go variables and database connections.
+*   **Example (`internal/repository/todo.go`):**
+    ```go
+    package repository
+    import (
+        "context"
+        "time"
+        "github.com/jackc/pgx/v5/pgxpool"
+        "my-go-project/internal/models" // Import your models
+    )
+
+    func CreateTodo(pool *pgxpool.Pool, title string, completed bool) (*models.Todo, error) {
+        // ... Context timeout logic ...
+        // ... SQL INSERT query ...
+        // ... pool.QueryRow().Scan(...) ...
+        // Returns the models.Todo
+    }
+    ```
+
+### 3. The `internal/handlers/` Folder
+**Rule of thumb:** Create one file per entity (e.g., `todo.go` or `todo_handler.go`).
+
+*   **What goes here:** 
+    *   Functions that take the `*gin.Context`.
+    *   Logic to read JSON bodies, read URL parameters, and send HTTP status codes (200, 400, 500).
+    *   Calls to the `repository` package.
+*   **Example (`internal/handlers/todo.go`):**
+    ```go
+    package handlers
+    import (
+        "net/http"
+        "github.com/gin-gonic/gin"
+        "github.com/jackc/pgx/v5/pgxpool"
+        "my-go-project/internal/models"     // To use CreateTodoInput
+        "my-go-project/internal/repository" // To call the DB logic
+    )
+
+    func CreateTodoHandler(pool *pgxpool.Pool) gin.HandlerFunc {
+        return func(c *gin.Context) {
+            var input models.CreateTodoInput
+            
+            // 1. Parse JSON
+            if err := c.ShouldBindJSON(&input); err != nil {
+                c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+                return
+            }
+
+            // 2. Call Repository
+            todo, err := repository.CreateTodo(pool, input.Title, input.Completed)
+            if err != nil {
+                c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+                return
+            }
+
+            // 3. Send Response
+            c.JSON(http.StatusCreated, todo)
+        }
+    }
+    ```
+
+### 4. The `main.go` File (Root Directory)
+**Rule of thumb:** Keep this file as clean as possible. It should only handle startup tasks.
+
+*   **What goes here:** 
+    *   Loading environment variables (`.env`).
+    *   Connecting to the database (creating the `pgxpool`).
+    *   Setting up the Gin router.
+    *   Mapping URLs to the functions in your `handlers` folder.
+*   **Example (`main.go`):**
+    ```go
+    package main
+    import (
+        "github.com/gin-gonic/gin"
+        "my-go-project/internal/handlers" // Import your handlers
+        // ... other imports (db connection, etc) ...
+    )
+
+    func main() {
+        // 1. Connect to DB
+        pool := ConnectToDatabase() 
+
+        // 2. Initialize Router
+        router := gin.Default()
+
+        // 3. Wire up the endpoints
+        // URL Path       |   Handler Function
+        router.POST("/todos", handlers.CreateTodoHandler(pool))
+        // router.GET("/todos", handlers.GetAllTodosHandler(pool))
+        // router.GET("/todos/:id", handlers.GetTodoByIDHandler(pool))
+
+        // 4. Start Server
+        router.Run(":8080")
+    }
+    ```
+
+---
+
+### 🚀 Your File-by-File Workflow for a New Feature
+If your boss says: *"We need an endpoint to create a User."*
+
+1. **Go to `internal/models/user.go`**: Write the `User` struct and `CreateUserInput` struct.
+2. **Go to `internal/repository/user.go`**: Write `CreateUser(pool, name, email)` with the `INSERT INTO users...` SQL.
+3. **Go to `internal/handlers/user.go`**: Write `CreateUserHandler(pool)` to parse the JSON and call the repository.
+4. **Go to `main.go`**: Add `router.POST("/users", handlers.CreateUserHandler(pool))`.
+5. **Open Postman**: Test it!

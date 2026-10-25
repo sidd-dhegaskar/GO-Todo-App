@@ -754,7 +754,7 @@ my-go-project/
 ---
 
 ### 🚀 Your File-by-File Workflow for a New Feature
-If your boss says: *"We need an endpoint to create a User."*
+Requirement: *"We need an endpoint to create a User."*
 
 1. **Go to `internal/models/user.go`**: Write the `User` struct and `CreateUserInput` struct.
 2. **Go to `internal/repository/user.go`**: Write `CreateUser(pool, name, email)` with the `INSERT INTO users...` SQL.

@@ -43,3 +43,4 @@ func GetAllTodoshandler(pool *pgxpool.Pool) gin.HandlerFunc{
 		c.JSON(http.StatusOK, todos)
 	}
 }
+

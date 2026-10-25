@@ -79,3 +79,5 @@ func GetAllTodos(pool *pgxpool.Pool)([]models.Todo,error){
 
 	return todos,nil
 }
+
+func GetTodoByID(pool *pgxpool.Pool) 

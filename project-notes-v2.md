@@ -1030,3 +1030,196 @@ You now have two routes that look identical but do different things:
 
 **Why is this allowed?** 
 In REST APIs, the URL path (`/todos`) represents the *resource*, while the HTTP Method (`GET`, `POST`, `PUT`, `DELETE`) represents the *action*. Because the HTTP methods are different, the router knows exactly which handler to trigger, even though the URL is exactly the same.
+
+# 25. Creating a repository for fetching a single Todo
+Let's tackle these one at a time. Both are very common points of confusion when learning Go!
+
+---
+
+### 1. The meaning of `&` and `*` (Pointers Explained)
+
+Think of computer memory like a giant neighborhood of houses. 
+* A **variable** is a house.
+* The **data** (like the number `5` or a `Todo` struct) is the person living inside the house.
+
+Here is how `&` and `*` fit into this:
+
+#### The Ampersand (`&`) = "The Address Of"
+When you put `&` in front of a variable, you are asking Go: *"What is the street address of this house?"*
+```go
+var myNumber int = 10
+// myNumber is the house. The value inside is 10.
+
+fmt.Println(&myNumber) 
+// This prints a memory address, like 0x1400001a0a8. 
+// It does NOT print 10. It prints WHERE the 10 lives.
+```
+**Why we use it in `Scan`:** When you do `Scan(&todo.ID)`, you are giving the database driver the *address* of your empty variable. You are saying, *"Here is the address to my house. Please drive over here and put the database data inside it."* If you didn't use `&`, `Scan` wouldn't know where to put the data!
+
+#### The Asterisk (`*`) = "Pointer To" (When used in a type)
+When you put `*` in front of a type (like `*models.Todo`), you are creating a **Pointer Type**. You are telling Go: *"This variable won't hold actual data. It will only hold a street address pointing to data."*
+```go
+// This function promises to return a STREET ADDRESS pointing to a Todo.
+func GetTodo() *models.Todo {
+    var myTodo models.Todo // Create the house
+    
+    return &myTodo // Return the street address of the house
+}
+```
+
+**Summary of the duo:**
+* `*` is used in the **setup** (function signatures) to say: *"I want an address."*
+* `&` is used in the **action** (return statements or passing variables) to say: *"Here is the address."*
+
+---
+Here are your study notes for the "Get Todo by ID" repository function, formatted to match your previous sections:
+
+# Chapter 18: Getting a Todo - Repository
+
+## 1. The Goal: Fetching a Single Row
+Instead of fetching all 100 rows in a database, a user often just wants to see the details of *one specific item*. To do this, the client must provide the unique `ID` of the Todo they are looking for. This repository function takes that ID, searches the database, and returns the single matching row.
+
+## 2. Function Signature & Context Setup
+```go
+func GetTodoByID(pool *pgxpool.Pool, id int) (*models.Todo, error) {
+	// 1. Setup the 5-second timeout context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+```
+*   **Inputs:** Notice that alongside the database `pool`, this function now requires an `id` of type `int`.
+*   **Outputs:** It returns a pointer to a single `models.Todo` struct (not a slice/array) and an `error`.
+*   **Context:** We use the exact same 5-second timeout pattern to ensure the database connection doesn't hang indefinitely.
+
+## 3. The SQL Query (`WHERE` Clause)
+```go
+	var query string = `
+	SELECT id, title, completed, created_at, updated_at
+	FROM todos
+	WHERE id=$1`
+```
+*   **`WHERE id=$1`:** This is the crucial difference from the "Get All" query. The `WHERE` clause filters the database. 
+*   **Placeholder (`$1`):** It tells PostgreSQL: *"Only return the row where the database ID exactly matches the first variable I pass to you."*
+
+## 4. Execution and Scanning (`QueryRow`)
+```go
+	// Create an empty struct to hold the single row's data
+	var todo models.Todo
+	
+	// Execute the query, passing the 'id' to replace the '$1' placeholder
+	var err error = pool.QueryRow(ctx, query, id).Scan(
+		&todo.ID,
+		&todo.Title,
+		&todo.Completed,
+		&todo.CreatedAt,
+		&todo.UpdatedAt,
+	)
+```
+*   **Back to `QueryRow`:** Because database IDs are unique (Primary Keys), we know this query will return a maximum of **one row**. Therefore, we go back to using `pool.QueryRow()` instead of `pool.Query()`.
+*   **Passing the ID:** Notice `pool.QueryRow(ctx, query, id)`. That `id` variable is injected safely into the `$1` placeholder in the SQL string.
+*   **`.Scan(...)`:** Just like in the "Create" function, we pass the memory addresses (`&`) of our empty `todo` struct so the database driver can write the fetched data directly into it.
+
+## 5. Error Handling & Return
+```go
+	// If the ID doesn't exist, or the database fails, return the error
+	if err != nil {
+		return nil, err
+	}
+
+	// Success! Return the memory address of the populated Todo struct
+	return &todo, nil
+} 
+```
+*   **Pattern Recognition:** As the instructor notes, repository functions follow a very predictable pattern: 
+    1. Setup Context ➔ 2. Write SQL ➔ 3. Execute & Scan ➔ 4. Handle Errors ➔ 5. Return Data. 
+    Once you understand this flow, you can write a repository function for almost any database operation!
+
+# 26. Creating a handler for fetching a single Todo
+Here are your detailed study notes for the "Get Todo by ID" handler, formatted to match your previous sections:
+
+# Chapter 19: Getting a Todo - Handler
+
+## 1. The Concept: Dynamic Routes & URL Parameters
+When a user wants to fetch a specific item, they need to tell the server *which* item they want. 
+*   **Static Routes:** A route that never changes (e.g., `/todos`). It always does the exact same thing.
+*   **Dynamic Routes:** A route that contains a variable placeholder (e.g., `/todos/:id`). 
+*   **Real-World Analogy:** Think of YouTube. Every video has a unique ID in the URL (e.g., `youtube.com/watch?v=12345`). The server reads that ID from the URL to figure out which video to load from the database. In API development, this extracted value is called a **URL Parameter** or **Route Parameter**.
+
+## 2. The Code Flow & Deep Dive
+
+Let's break down the handler code step-by-step to see how we extract this ID and use it.
+
+### Step A: Extracting the URL Parameter
+```go
+func GetTodoByIDHandler(pool *pgxpool.Pool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 1. Extract the "id" parameter from the URL
+		idstr := c.Param("id")
+```
+*   **`c.Param("id")`:** This Gin method looks at the incoming URL and extracts the value sitting in the `:id` placeholder. 
+*   **The Catch:** URLs are *always* text. Even if the user requests `/todos/2`, `c.Param` will return the **string** `"2"`, not the number `2`.
+
+### Step B: String to Integer Conversion (`strconv.Atoi`)
+```go
+		// 2. Convert the string ID into an integer
+		id, err := strconv.Atoi(idstr)
+		
+		if err != nil {
+			// If conversion fails (e.g., user sent /todos/abc)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid todo ID"})
+			return
+		}
+```
+*   **`strconv.Atoi` (ASCII to Integer):** This is a built-in Go function from the `strconv` package. It attempts to strip the quotes off a string and turn it into a real math number.
+*   **Two Return Values:** It returns the converted number (`id`) and an error (`err`). 
+    *   If you pass `"2"`, it returns `2` and `nil` (success).
+    *   If you pass `"apple"`, it returns `0` and an `invalid syntax` error.
+*   **Error Handling:** If the user passes text instead of a number, we immediately stop and send a `400 Bad Request` because the client made a mistake.
+
+### Step C: Calling the Repository & Handling Specific Errors
+```go
+		// 3. Call the database repository
+		todo, err := repository.GetTodoByID(pool, id)
+		
+		if err != nil {
+			// 4a. Check if the error is specifically because the row doesn't exist
+			if err == pgx.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Todo not found"})
+				return
+			}
+			// 4b. If it's any other database error (e.g., connection lost)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+```
+*   We pass the newly converted integer `id` to our repository function.
+*   **`pgx.ErrNoRows`:** This is a very specific error provided by the PostgreSQL driver. It means: *"The query executed perfectly, but I couldn't find any row with that ID."* 
+*   **`http.StatusNotFound` (404):** If the row doesn't exist, we send a 404 error. This is the exact same 404 error you see when you visit a dead link on a website!
+*   **`http.StatusInternalServerError` (500):** If the error was something else (like the database server crashing), we send a 500 error.
+
+### Step D: Sending the Success Response
+```go
+		// 5. Success! Send the single Todo back to the client
+		c.JSON(http.StatusOK, todo)
+	}
+}
+```
+*   If we bypass all the error checks, we use `c.JSON` to send an `http.StatusOK` (200) along with the single `todo` object.
+
+---
+
+## 3. Wiring the Dynamic Route in `main.go`
+To make this handler work, we have to tell the Gin router to expect a dynamic parameter.
+
+*Transcript context: This happens in your server setup file.*
+```go
+// The colon (:) tells Gin that "id" is a dynamic variable, not a literal word.
+router.GET("/todos/:id", handlers.GetTodoByIDHandler(pool))
+```
+*   **How it works:** 
+    *   If a user requests `/todos/1`, Gin triggers this handler and `c.Param("id")` becomes `"1"`.
+    *   If a user requests `/todos/99`, Gin triggers this handler and `c.Param("id")` becomes `"99"`.
+    *   If a user requests `/todos` (without an ID), Gin ignores this route and triggers the `GetAllTodos` handler instead.
+
+# 27. Creating a repository for updating a single Todo

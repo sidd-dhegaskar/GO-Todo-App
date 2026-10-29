@@ -1556,3 +1556,117 @@ During the video, the instructor runs into a few common SQL and migration errors
 1.  **Trailing Comma Error:** SQL will throw a syntax error if you leave a comma after the last column definition in your `CREATE TABLE` statement.
 2.  **Typo in UUID Function:** The instructor initially typed `get_random_uuid()`. The correct built-in PostgreSQL function is **`gen_random_uuid()`** (generate).
 3.  **"Dirty Database" State:** Because the migration failed halfway through, the database became "dirty" (stuck in an error state). To fix this, the instructor had to use the `migrate force` command to reset the migration version, clear the errors, and run the `up` migration again.
+
+# Chapter 28: Creating Users' model
+
+Here are your detailed study notes for creating the User model, formatted to match your previous chapters:
+
+# Chapter 28: Creating the User Model
+
+## 1. The Big Picture: Authentication vs. Authorization
+Before writing the code, the instructor outlines the roadmap for the next phase of the application. The goal is to implement two distinct security concepts:
+*   **Authentication (Who are you?):** Allowing users to register and log in.
+*   **Authorization (What are you allowed to do?):** Ensuring that once a user is logged in, they can only create, view, or delete *their own* Todos, not someone else's.
+
+To start this process, we need a blueprint (a Go struct) that represents a User in our application code.
+
+## 2. Creating the Blueprint (`models/user.go`)
+Just like we created a `Todo` struct to represent a single row in the `todos` table, we need a `User` struct to represent a single row in the `users` table. 
+
+This file is created inside the `models` directory.
+
+```go
+package models
+
+import(
+	"time"
+)
+
+type User struct{
+	ID        string    `json:"id" db:"id"`
+	Email     string    `json:"email" db:"email"`
+	Password  string    `json:"password" db:"password"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+}
+```
+
+## 3. Code Breakdown & Logic
+
+*   **`ID string`:** Even though we defined the ID as a `UUID` in our PostgreSQL database, a UUID is ultimately just a long sequence of alphanumeric characters (e.g., `550e8400-e29b-41d4-a716-446655440000`). Therefore, in Go, we represent it using the standard `string` type.
+*   **`Email` & `Password`:** Both are standard strings, mapping directly to the `VARCHAR(255)` columns in the database.
+*   **`CreatedAt` & `UpdatedAt`:** These use Go's built-in `time.Time` type (imported from the `time` package) to handle the PostgreSQL `TIMESTAMP WITH TIME ZONE` data.
+*   **Struct Tags (`json` and `db`):** 
+    *   The `` `json:"..."` `` tags tell Gin how to format this struct when sending it to the frontend (e.g., converting the capitalized Go field `Email` into the lowercase JSON key `"email"`).
+    *   The `` `db:"..."` `` tags act as a reference to map these Go fields directly to the exact column names we created in our SQL migration.
+
+# Chapter 29: Creating Users' repository
+Here are your detailed study notes for the "Create User" repository function, formatted to match your previous chapters. 
+
+*Note: There is a very common bug in the provided code snippet that contradicts the SQL query. I have highlighted it in Step 4 so you know exactly how to fix it!*
+
+# Chapter 29: Creating a User - Repository
+
+## 1. The Goal: User Registration
+This repository function acts as the database layer for **User Registration**. 
+The handler (which we will build later) will receive an email and password from the client. It will package those into a `models.User` struct and pass it to this function. This function's job is to insert that data into the database and return the fully populated user (now containing the database-generated UUID and timestamps).
+
+## 2. Function Signature & Context Setup
+```go
+func CreateUser(pool *pgxpool.Pool, user *models.User) (*models.User, error) {
+	// 1. Setup the standard 5-second timeout context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+```
+*   **Inputs:** We pass the database `pool` and a pointer to a `models.User` (`*models.User`). We use a pointer here so that when the database generates the `ID`, `CreatedAt`, and `UpdatedAt`, we can modify the exact same struct the handler gave us.
+*   **Outputs:** Returns the populated `*models.User` and an `error`.
+
+## 3. The SQL Query (`INSERT INTO`)
+```go
+	var query string = `
+	INSERT INTO users(email, password)
+	VALUES($1, $2)
+	RETURNING id, email, created_at, updated_at
+	`
+```
+*   **`INSERT INTO users(email, password)`:** We are only inserting the email and password. We don't insert the `id` or timestamps because our PostgreSQL table was set up to generate those automatically (`DEFAULT gen_random_uuid()` and `DEFAULT CURRENT_TIMESTAMP`).
+*   **`VALUES($1, $2)`:** Placeholders for the user's email and password to prevent SQL injection.
+*   **`RETURNING ...`:** We ask the database to hand back the newly generated `id`, the `email`, and the timestamps. 
+*   **Security Best Practice:** Notice that we **do not** include `password` in the `RETURNING` clause. You should never send passwords back to the frontend after they are created!
+
+## 4. Execution and Scanning (⚠️ Important Bug Fix)
+In the transcript, the instructor mentions not returning the password, but accidentally includes it in the `.Scan()` method. 
+
+**The Rule of `Scan`:** The number of variables inside `.Scan()` **must exactly match** the number of columns in your `RETURNING` clause. 
+
+If your SQL returns 4 columns (`id, email, created_at, updated_at`), but you put 5 variables in `.Scan()`, Go will throw a runtime error: `sql: expected 4 destination arguments in Scan, not 5`.
+
+**Here is the corrected code:**
+```go
+	// Execute the query, passing Email to $1 and Password to $2
+	err := pool.QueryRow(ctx, query, user.Email, user.Password).Scan(
+		&user.ID,
+		&user.Email,
+		// &user.Password, <--- REMOVE THIS! It is not in the RETURNING clause.
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+```
+
+## 5. Error Handling & Return
+```go
+	// If the email already exists (violating the UNIQUE constraint), 
+    // or the database fails, return the error.
+	if err != nil {
+		return nil, err
+	}
+	
+	// Success! Return the fully populated user struct.
+	return user, nil
+}
+```
+*   Because we set the `email` column to be `UNIQUE` in our migration, if a user tries to register with an email that already exists, `pool.QueryRow` will fail and return a constraint violation error here. We will handle this specific error later in the Handler layer.
+
+# Chapter 30: Getting a User - Repository

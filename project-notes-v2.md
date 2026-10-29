@@ -1491,3 +1491,68 @@ You cannot write `*input.Title == nil` for two critical reasons:
 Always check the pointer first, *then* check the value:
 *   **`input.Title == nil`** ➔ *"Is there a string value at all?"*
 *   **`*input.Title == ""`** ➔ *"I know the string exists, but is it empty?"*
+
+# 28. Creating User migration
+
+Here are your detailed study notes for creating the Users migration, formatted to match your previous chapters:
+
+# Chapter 27: Creating Users' Migration - PostgreSQL
+
+## 1. The Goal: Starting the Users Feature
+Now that the Todos feature is complete, the app needs a way to handle Users (for authentication and authorization). We will follow the exact same workflow we used for Todos:
+1.  **Migrations** (Create the database tables)
+2.  **Repository** (Write the database queries)
+3.  **Handler** (Handle the HTTP requests)
+
+Before starting, the instructor runs `go mod tidy` in the terminal to clean up any missing dependencies and fix workspace errors.
+
+## 2. Generating the Migration Files
+To create the new up and down SQL files, we use the `golang-migrate` CLI tool again:
+```bash
+migrate create -ext sql -dir migrations -seq create_users_api_table
+```
+This generates two files in the `/migrations` folder:
+*   `..._create_users_api_table.up.sql`
+*   `..._create_users_api_table.down.sql`
+
+---
+
+## 3. The Up Migration (Creating the Table)
+Here is the SQL to create the `users` table. There are two major new concepts here compared to the `todos` table: **UUIDs** and **Indexes**.
+
+```sql
+CREATE TABLE IF NOT EXISTS users(
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email on users(email);
+```
+
+### Breaking down the SQL Logic:
+*   **`id UUID ... DEFAULT gen_random_uuid()`:** Instead of an auto-incrementing integer (1, 2, 3...), we use a UUID (Universally Unique Identifier). This generates a long, random alphanumeric string. It is much more secure for users because hackers cannot guess user IDs.
+*   **`email ... UNIQUE NOT NULL`:** The `UNIQUE` constraint ensures that no two users can register with the exact same email address.
+*   **`password ... NOT NULL`:** Stores the user's password (which will be hashed later). It cannot be empty.
+*   **`CREATE INDEX ... on users(email)`:** This is a massive performance booster. When a user logs in, the database has to search for their email. By creating an **Index** on the email column, the database organizes the emails for lightning-fast lookups, rather than scanning every single row one by one.
+
+---
+
+## 4. The Down Migration (Reverting)
+The down migration simply undoes what the up migration did. If we need to roll back our database, we destroy the table.
+
+```sql
+DROP TABLE IF EXISTS users;
+```
+*(Note: Dropping the table automatically drops the index associated with it, so we don't need a separate command to drop the index).*
+
+---
+
+## 5. Troubleshooting Migrations (Real-World Errors)
+During the video, the instructor runs into a few common SQL and migration errors. Here is how they were fixed:
+
+1.  **Trailing Comma Error:** SQL will throw a syntax error if you leave a comma after the last column definition in your `CREATE TABLE` statement.
+2.  **Typo in UUID Function:** The instructor initially typed `get_random_uuid()`. The correct built-in PostgreSQL function is **`gen_random_uuid()`** (generate).
+3.  **"Dirty Database" State:** Because the migration failed halfway through, the database became "dirty" (stuck in an error state). To fix this, the instructor had to use the `migrate force` command to reset the migration version, clear the errors, and run the `up` migration again.

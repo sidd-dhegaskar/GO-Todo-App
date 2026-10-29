@@ -427,6 +427,7 @@ Once we have our SQL query, we need to execute it and store the returned data in
     *   This method takes the single row returned by PostgreSQL and copies its columns into our Go variables.
     *   **Why the Ampersand (`&`)?** `Scan` needs to *modify* the empty `todo` struct we created. If we just passed `todo.ID`, Go would pass a *copy* of the value (which is 0), and `Scan` wouldn't be able to change the original struct. By passing the memory address (`&todo.ID`), `Scan` goes directly to that location in memory and writes the database values into our struct.
     *   *Note:* The order of variables inside `.Scan()` must exactly match the order of the columns in your SQL `RETURNING` clause.
+	**We also create the pointer using "&"**
 
 ### 5. Error Handling & Returning the Result
 Finally, we check if the database operation failed. If it succeeded, we return the populated struct.
@@ -1223,3 +1224,185 @@ router.GET("/todos/:id", handlers.GetTodoByIDHandler(pool))
     *   If a user requests `/todos` (without an ID), Gin ignores this route and triggers the `GetAllTodos` handler instead.
 
 # 27. Creating a repository for updating a single Todo
+Here are your detailed study notes for the "Update Todo" repository function, formatted to match your previous sections:
+
+# Chapter 21: Updating a Todo - Repository
+
+## 1. The Goal: Modifying Existing Data
+When updating a record in a database, you need two distinct pieces of information:
+1.  **The Identifier:** Which item are we changing? (The `id`).
+2.  **The New Data:** What are the new values? (The `title` and `completed` status).
+
+Because of this, our function signature must accept all three of these values from the handler, alongside the database connection pool.
+
+## 2. Function Signature & Context Setup
+```go
+func UpdateTodo(pool *pgxpool.Pool, id int, title string, completed bool) (*models.Todo, error) {
+	// 1. Setup the standard 5-second timeout context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+```
+*   **Inputs:** `id` (to find the row), `title` and `completed` (the new data to overwrite the old data).
+*   **Outputs:** Returns a pointer to the updated `models.Todo` struct, and an `error`.
+
+## 3. The SQL Query (`UPDATE` Statement)
+Updating data requires a different SQL command than inserting or selecting. 
+
+```go
+	var query string = `
+	UPDATE todos
+	SET title=$1, completed=$2, updated_at=CURRENT_TIMESTAMP
+	WHERE id=$3
+	RETURNING id, title, completed, created_at, updated_at`
+```
+### Breaking down the SQL:
+*   **`UPDATE todos`:** Tells PostgreSQL which table we want to modify.
+*   **`SET ...`:** This defines exactly which columns are changing. 
+    *   `title=$1` and `completed=$2` will be replaced by the user's new data.
+    *   **`updated_at=CURRENT_TIMESTAMP`:** Notice there is no `$3` placeholder here! We don't trust the frontend to tell us what time it is. Instead, we tell the PostgreSQL database to automatically stamp this column with the exact current server time.
+*   **`WHERE id=$3`:** **CRITICAL!** If you forget the `WHERE` clause in an `UPDATE` statement, the database will overwrite *every single row* in your table with this new data. This ensures we only update the specific Todo the user requested.
+*   **`RETURNING ...`:** Just like in our Create function, this forces the database to hand back the fully updated row so we can send it to the frontend.
+
+## 4. Execution and Scanning (`QueryRow`)
+```go
+	var todo models.Todo
+
+	// Execute the query and map the variables to the $1, $2, $3 placeholders
+	var err error = pool.QueryRow(ctx, query, title, completed, id).Scan(
+		&todo.ID,
+		&todo.Title,
+		&todo.Completed,
+		&todo.CreatedAt,
+		&todo.UpdatedAt,
+	)
+```
+*   **Placeholder Mapping (Important Note):** The order of the variables you pass into `QueryRow` **must exactly match** the numbers in your SQL string. 
+    *   `title` maps to `$1`
+    *   `completed` maps to `$2`
+    *   `id` maps to `$3`
+    *(Note: In the raw code you provided, `id` was passed first, which would cause a database error because it would try to put the integer ID into the string Title column. Always ensure your Go variables align with your SQL `$x` placeholders!)*
+*   **`.Scan(...)`:** Because we used `RETURNING`, `QueryRow` gives us back one row. We use `.Scan()` with memory addresses (`&`) to overwrite our empty `todo` struct with the fresh database data.
+
+## 5. Error Handling & Return
+```go
+	// If the ID doesn't exist, or the database fails, return the error
+	if err != nil {
+		return nil, err
+	}
+	
+	// Success! Return the memory address of the updated Todo struct
+	return &todo, nil
+}
+```
+*   If the user passes an `id` that doesn't exist in the database, the `WHERE` clause will fail to find a match, `RETURNING` will return nothing, and `QueryRow` will generate a `pgx.ErrNoRows` error, which we will handle in the Handler layer.
+
+# 28. Creating a handler for updating a single Todo
+Here are your detailed study notes for the "Update Todo" handler, focusing heavily on the logic behind pointers and the different update scenarios.
+
+# Chapter 22: Updating a Todo - Handler
+
+## 1. The Core Problem: Why use `*bool` (Pointer to Boolean)?
+When updating a database record, a user might want to update *only* the title, *only* the completed status, or *both*. 
+
+If we define our input struct with a regular boolean (`Completed bool`), we run into a massive problem with Go's "zero values":
+*   In Go, if a boolean is not provided, it automatically defaults to `false`.
+*   If a user sends a JSON request updating *only* the title (`{"title": "Buy milk"}`), the JSON parser will see no `completed` field and automatically set our Go variable to `false`.
+*   **The Bug:** The backend wouldn't know if the user explicitly typed `"completed": false`, or if they just left it blank. It would accidentally overwrite the database status to `false` every time!
+
+### The Solution: Pointers (`*bool`)
+By changing the type to a pointer (`*bool`), the default "zero value" becomes `nil` (meaning "no memory address provided"). This gives us exactly **three distinct cases** to track what the user actually sent:
+
+1.  **Case 1 (User sends `true`):** The pointer holds the memory address of the value `true`. (Action: Update DB to true).
+2.  **Case 2 (User sends `false`):** The pointer holds the memory address of the value `false`. (Action: Update DB to false).
+3.  **Case 3 (User omits the field):** The pointer is `nil`. (Action: Do not update this field in the DB; leave it as it was).
+
+```go
+type UpdateTodoInput struct {
+	Title     string `json:"title"`
+	Completed *bool  `json:"completed"` // Pointer allows us to check for 'nil'
+}
+```
+
+## 2. The Code Flow & Logic
+
+### Step A: Extract ID and Parse JSON
+```go
+func UpdateTodoHandler(pool *pgxpool.Pool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 1. Get the ID from the URL (/todos/:id) and convert to integer
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Todo Id"})
+			return
+		}
+
+		// 2. Parse the incoming JSON body into our struct
+		var input UpdateTodoInput
+		if err := c.ShouldBindJSON(&input); err != nil { 
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+```
+
+### Step B: Custom Validation (Did they send anything?)
+```go
+		// 3. Check if the user sent a completely empty update request
+		if input.Title == "" && input.Completed == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Provide minimum of 1 field"})
+			return
+		}
+```
+*   If the `Title` is an empty string AND `Completed` is `nil`, the user is asking to update the Todo but hasn't provided any new data. We reject this with a `400 Bad Request`.
+
+### Step C: Dereferencing the Pointer
+You cannot save a "memory address" (pointer) into a PostgreSQL boolean column. You must extract the actual `true` or `false` value from that address. This is called **dereferencing**.
+
+```go
+		// 4. Prepare the boolean value for the database
+		var completed bool
+		
+		// Only attempt to extract the value if the pointer is NOT nil
+		if input.Completed != nil {
+			completed = *input.Completed // The '*' here means "get the value at this address"
+		}
+```
+*   **The Dual Use of `*`:** 
+    *   In `*bool` (Type definition), the asterisk means "This is a pointer type."
+    *   In `*input.Completed` (Execution), the asterisk means "Go to this memory address and grab the actual value."
+
+### Step D: Calling the Repository & Handling Errors
+```go
+		// 5. Pass the extracted data to the database layer
+		todo, err := repository.UpdateTodo(pool, id, input.Title, completed)
+
+		if err != nil {
+			// If the ID doesn't exist in the database
+			if err == pgx.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Todo not found"})
+				return
+			}
+			// For all other database crashes
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		
+		// 6. Success! Send the updated Todo back to the client
+		c.JSON(http.StatusOK, todo)
+	}
+}
+```
+
+## 3. Wiring the Route (`PUT` vs `GET`)
+To connect this handler, we use the `PUT` HTTP method in our `main.go` file.
+
+*Transcript context: This happens in your server setup file.*
+```go
+router.PUT("/todos/:id", handlers.UpdateTodoHandler(pool))
+```
+*   **RESTful Design:** Notice that the URL (`/todos/:id`) is exactly the same as the one used to *fetch* a single Todo. 
+*   The router knows which handler to trigger based entirely on the HTTP Method:
+    *   `GET /todos/1` ➔ Triggers `GetTodoByIDHandler`
+    *   `PUT /todos/1` ➔ Triggers `UpdateTodoHandler`

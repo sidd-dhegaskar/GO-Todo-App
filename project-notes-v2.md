@@ -1406,3 +1406,88 @@ router.PUT("/todos/:id", handlers.UpdateTodoHandler(pool))
 *   The router knows which handler to trigger based entirely on the HTTP Method:
     *   `GET /todos/1` ➔ Triggers `GetTodoByIDHandler`
     *   `PUT /todos/1` ➔ Triggers `UpdateTodoHandler`
+
+# Appendix: Mastering Pointers in Go
+
+## 1. The Golden Rules of Pointers
+Understanding when to use `&` (address of) and `*` (dereference) can be confusing. Let's use a simple `User` struct to define the four golden rules of passing variables in Go.
+
+```go
+type User struct {
+    Name string
+}
+```
+
+### Rule 1: Need `*User`, have `User` ➔ Use `&user`
+```go
+user := User{Name: "Alex"}
+SaveUser(&user)
+```
+*   **Logic:** The function expects a pointer (memory address), but you have a standard value. Using `&user` gets the value's memory address.
+
+### Rule 2: Need `User`, have `*User` ➔ Use `*user`
+```go
+user := &User{Name: "Alex"}
+PrintUser(*user)
+```
+*   **Logic:** The function expects a standard value, but you have a pointer. Using `*user` accesses the actual value the pointer points to, passing a copy of it.
+
+### Rule 3: Need `*User`, already have `*User` ➔ Pass `user`
+```go
+user := &User{Name: "Alex"}
+SaveUser(user)
+```
+*   **Logic:** Your variable is already a pointer, so it perfectly matches the function's expected type. *(Note: Adding `&` here would accidentally create a `**User`, which is a pointer to a pointer!)*
+
+### Rule 4: Need `User`, already have `User` ➔ Pass `user`
+```go
+user := User{Name: "Alex"}
+PrintUser(user)
+```
+*   **Logic:** Both types match perfectly. Pass the value directly; no address or dereferencing is needed.
+
+---
+
+## 2. Quick Reference Cheat Sheet
+
+| You have... | Function needs... | What to pass |
+| :--- | :--- | :--- |
+| `User` (Value) | `*User` (Pointer) | **`&user`** |
+| `*User` (Pointer) | `User` (Value) | **`*user`** |
+| `*User` (Pointer) | `*User` (Pointer) | **`user`** |
+| `User` (Value) | `User` (Value) | **`user`** |
+
+*   **`&`** gets an address.
+*   **`*`** in a type definition means "this is a pointer".
+*   **`*`** applied to a variable means "get the value at this address".
+
+---
+
+## 3. Validating Optional Fields (The `input.Title` Case)
+When building APIs, you often use pointers for optional fields (like `*string` for a title) so you can tell if the user omitted the field entirely. 
+
+Consider this validation logic:
+```go
+// 1. Did they omit both fields entirely?
+if input.Title == nil && input.Completed == nil {
+    c.JSON(http.StatusBadRequest, gin.H{"error": "Provide minimum of 1 field"})
+    return
+}
+
+// 2. Did they provide a title, but leave it blank?
+if input.Title != nil && *input.Title == "" {
+    c.JSON(http.StatusBadRequest, gin.H{"error": "Title cannot be empty"})
+    return
+}
+```
+
+### Why can't we just write `*input.Title == nil`?
+You cannot write `*input.Title == nil` for two critical reasons:
+
+1.  **Type Mismatch:** `input.Title` is a pointer (`*string`). `*input.Title` is the actual string value (e.g., `"Buy milk"`). In Go, a string can be empty (`""`), but it can **never** be `nil`. You cannot compare a string to `nil`.
+2.  **Runtime Panics:** If the user didn't provide a title, `input.Title` is `nil`. If you try to dereference a nil pointer (by writing `*input.Title`), your program will instantly crash (panic) because it is trying to read a value from a memory address that doesn't exist.
+
+### The Safe Order of Operations
+Always check the pointer first, *then* check the value:
+*   **`input.Title == nil`** ➔ *"Is there a string value at all?"*
+*   **`*input.Title == ""`** ➔ *"I know the string exists, but is it empty?"*

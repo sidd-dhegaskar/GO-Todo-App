@@ -1669,4 +1669,69 @@ If your SQL returns 4 columns (`id, email, created_at, updated_at`), but you put
 ```
 *   Because we set the `email` column to be `UNIQUE` in our migration, if a user tries to register with an email that already exists, `pool.QueryRow` will fail and return a constraint violation error here. We will handle this specific error later in the Handler layer.
 
-# Chapter 30: Getting a User - Repository
+# Chapter 30: Getting a User by email  - Repository
+# Chapter 30: Getting a User by Email - Repository
+
+## 1. The Goal: Fetching a User
+This repository function acts as the database layer for retrieving a specific user using their email address. 
+Unlike the creation process, the handler will only pass an email string to this function. This function's job is to query the database for that email, map the returned database row into a `models.User` struct, and return it to the handler (which will be useful later for login and authentication).
+
+## 2. Function Signature & Context Setup
+```go
+func GetUserByEmail(pool *pgxpool.Pool, email string) (*models.User, error) {
+	// 1. Setup the standard 5-second timeout context
+	var ctx context.Context
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+```
+*   **Inputs:** We pass the database `pool` and a simple `email string`. Because the user doesn't exist in our application memory yet, we don't pass a struct.
+*   **Outputs:** Returns a pointer to a `models.User` (`*models.User`) and an `error`. Returning a pointer allows us to return `nil` if the user is not found.
+
+## 3. The SQL Query (`SELECT`)
+```go
+	// Note: Explicitly naming columns is safer and more predictable than SELECT *
+	var query string = `
+	SELECT id, email, created_at, updated_at
+	FROM users
+	WHERE email=$1
+	`
+```
+*   **Avoid `SELECT *`:** Explicitly naming the columns (`id, email, created_at, updated_at`) is a best practice. It makes the code predictable and prevents your application from breaking if the database table schema changes in the future.
+*   **`WHERE email=$1`:** We use a placeholder (`$1`) for the user's email to prevent SQL injection attacks.
+*   **Omitting the Password:** As the instructor mentioned, we don't necessarily need the password here depending on the use case, so it is safer to omit it from the `SELECT` statement unless specifically required for password verification later.
+
+## 4. Execution and Scanning (⚠️ Important Bug Fixes)
+In the transcript and original code provided, there are two bugs. 
+
+**Bug 1: `SELECT` vs `.Scan()` Mismatch:** The original SQL queried 5 columns (including `password`), but `.Scan()` only had 4 destination variables. The number of selected columns **must exactly match** the number of variables inside `.Scan()`. We fix this by removing `password` from the SQL query above.
+
+**Bug 2: Returning a Value vs Pointer:** The function signature promises to return `*models.User` (a pointer), but the original code ended with `return user, nil` (a value).
+
+**Here is the corrected code:**
+```go
+	var user models.User
+
+	// Execute the query, passing Email to $1, and scan the 4 selected columns
+	err := pool.QueryRow(ctx, query, email).Scan(
+		&user.ID,
+		&user.Email,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+```
+*   **`pool.QueryRow()`:** Used instead of `Query` because we only expect exactly *one* row (since email is a `UNIQUE` column in our database).
+*   **Pointers in `.Scan()`:** We must pass memory addresses (e.g., `&user.ID`) so the database driver can write the fetched values directly into our newly created `user` struct.
+
+## 5. Error Handling & Return
+```go
+	// If the user doesn't exist, or the database fails, return the error.
+	if err != nil {
+		return nil, err
+	}
+	
+	// Success! Return a POINTER to the fully populated user struct.
+	return &user, nil // <--- FIX: Added '&' to return a pointer
+}
+```
+*   If a user with that email does not exist in the database, `pool.QueryRow().Scan()` will return a specific error (typically `pgx.ErrNoRows`). By passing this error up, our handler layer can intelligently respond to the client with a "404 Not Found" or "Invalid Credentials" message.

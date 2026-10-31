@@ -1926,4 +1926,86 @@ When a user sends `"password123"` to your API to register, here is exactly what 
 4.  **Format:** It glues the Version, Cost Factor, Salt, and Final Hash together into one long string, separated by `$`.
 5.  **Store:** This final string is what gets saved into the PostgreSQL `password` column.
 
-# USER LOGIN - JWT
+# CHAPTER 35 - USER LOGIN - JWT 
+
+Here are your detailed study notes for the User Login Handler, with a special deep dive into the cryptographic and token-generation concepts you requested.
+
+# Chapter 36: User Login - Handler
+
+## 1. The Goal: Authentication & Token Generation
+The login handler is responsible for **Authentication** (verifying the user is who they say they are). 
+The flow is:
+1. Receive email and password from the user.
+2. Fetch the user from the database using the email.
+3. Compare the provided password against the hashed password in the database.
+4. If successful, generate a **JSON Web Token (JWT)** and send it back to the user.
+
+### The Structs
+```go
+type LoginRequest struct{
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+type LoginResponse struct{
+	Token string `json:"token"`
+}
+```
+
+---
+
+## Deep Dive 1: Byte Slices (`[]byte`)
+In the code, when we compare passwords or sign the JWT, we wrap our strings in `[]byte(...)`:
+```go
+[]byte(user.Password)
+[]byte(cfg.JWTSecret)
+```
+**Why do we do this?**
+*   **Strings are for humans:** In Go, a `string` is a read-only slice of bytes designed to represent human-readable text (UTF-8). 
+*   **Bytes are for math:** Cryptography algorithms (like bcrypt and HMAC) don't care about text; they perform complex mathematical operations on raw binary data. 
+*   **Type Conversion:** `[]byte("password")` converts the human-readable string into a slice (a dynamic array) of raw byte values (e.g., `[112 97 115 115 119 111 114 100]`) so the cryptographic functions can process them.
+
+---
+
+## Deep Dive 2: `bcrypt.CompareHashAndPassword` & The Salt
+```go
+err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(loginRequest.Password))
+```
+This single line of code does a massive amount of heavy lifting. 
+
+**How does it know the Salt?**
+Remember that a bcrypt hash looks like this: `$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy`
+1.  **Extraction:** The `CompareHashAndPassword` function looks at the database hash (`user.Password`). It reads the first 29 characters to extract the **Algorithm Version** (`$2a$`), the **Cost Factor** (`10`), and the **Salt** (`N9qo8uLOickgx2ZMRZoMy`).
+2.  **Re-hashing:** It takes the plain-text password the user just typed in (`loginRequest.Password`), applies that *exact same salt*, and runs it through the hashing algorithm 1,024 times (cost factor 10).
+3.  **Comparison:** It checks if the newly generated hash matches the final 31 characters of the database hash. If they match, the password is correct.
+
+---
+
+## Deep Dive 3: JWT Claims (`jwt.MapClaims`)
+Once the user is authenticated, we create a JWT. A JWT contains a "Payload" of data, which in the JWT world is called **Claims**.
+
+```go
+// map[string]any{}
+claims := jwt.MapClaims{
+    "user_id": user.ID,
+    "email":   user.Email,
+    "exp":     time.Now().Add(24 * time.Hour).Unix(),
+}
+```
+*   **What is `MapClaims`?** It is simply a Go map where the keys are strings, and the values can be anything (`interface{}` or `any`).
+*   **Custom Claims:** We attach the `user_id` and `email`. This means for the next 24 hours, whenever the user makes a request, our server can read this token and instantly know *who* is making the request without querying the database!
+*   **Standard Claims (`exp`):** `exp` stands for Expiration. JWT requires this to be a **Unix Timestamp** (the number of seconds that have passed since January 1, 1970). `time.Now().Add(...).Unix()` calculates the exact second this token should die (24 hours from now).
+
+---
+
+## Deep Dive 4: JWT Signing (`jwt.SigningMethodHS256`)
+A JWT is useless if a hacker can just change the `user_id` inside of it. To prevent tampering, we must **Sign** the token.
+
+```go
+token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+tokenString, err := token.SignedString([]byte(cfg.JWTSecret))
+```
+*   **`SigningMethodHS256`:** This tells the JWT library to use the **HMAC SHA-256** algorithm. 
+    *   **Symmetric Encryption:** HS256 is a *symmetric* algorithm. This means the exact same secret key (`cfg.JWTSecret`) is used to *create* the signature, and will be used later to *verify* the signature.
+*   **`SignedString`:** This function takes the Header, takes your Claims, and hashes them together using your server's highly guarded `JWTSecret`. 
+*   **The Result:** If a hacker intercepts the token and changes the `user_id` from `1` to `2`, the signature will become invalid. When your server receives the tampered token, it will re-calculate the signature using the `JWTSecret`, realize it doesn't match, and reject the request.

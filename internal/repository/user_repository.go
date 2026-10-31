@@ -48,6 +48,7 @@ func GetUserByEmail(pool *pgxpool.Pool, email string )(*models.User,error){
 	err := pool.QueryRow(ctx,query,email).Scan(
 		&user.ID,
 		&user.Email,
+		&user.Password,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -74,6 +75,7 @@ func GetUserByID(pool *pgxpool.Pool, id string )(*models.User,error){
 	err := pool.QueryRow(ctx,query,id).Scan(
 		&user.ID,
 		&user.Email,
+		&user.Password,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
